@@ -12,7 +12,7 @@ import xgboost as xgb
 from sklearn.ensemble import RandomForestClassifier
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.utils import to_categorical
 
 def haversine_distance(lat1, lon1, lat2, lon2):
@@ -61,9 +61,7 @@ def create_sequences(features, targets, time_steps=10):
     """
     Converts time-series data into sequences for LSTM training.
     """
-    X_seq, y_seq = [], []
-    # We need the original indices to get the true coordinates later
-    target_indices = []
+    X_seq, y_seq, target_indices = [], [], []
     for i in range(len(features) - time_steps):
         X_seq.append(features[i:(i + time_steps)])
         y_seq.append(targets[i + time_steps])
@@ -75,43 +73,33 @@ def train_and_evaluate_lstm_classifier(X_scaled, y_encoded, num_classes, df_filt
     Handles the specific data prep, training, and evaluation for the LSTM model.
     """
     print("\n--- Preparing Data and Training LSTM ---")
-    
-    # 1. Create sequences for LSTM
     TIME_STEPS = 10
     X_seq, y_seq, seq_indices = create_sequences(X_scaled, y_encoded, TIME_STEPS)
-    
-    # One-hot encode the target variable for classification with Keras
     y_seq_categorical = to_categorical(y_seq, num_classes=num_classes)
-
-    # 2. Split sequence data
-    X_train, X_test, y_train, y_test, train_indices, test_indices = train_test_split(
+    X_train, X_test, y_train, y_test, _, test_indices_lstm_seq = train_test_split(
         X_seq, y_seq_categorical, seq_indices, test_size=0.2, random_state=42, stratify=y_seq_categorical
     )
     print(f"LSTM data split into {len(X_train)} training and {len(X_test)} testing sequences.")
 
-    # 3. Build and train model
     model = Sequential([
         LSTM(100, return_sequences=False, input_shape=(X_train.shape[1], X_train.shape[2])),
         Dropout(0.3),
         Dense(50, activation='relu'),
         Dropout(0.3),
-        Dense(num_classes, activation='softmax') # Softmax for multi-class classification
+        Dense(num_classes, activation='softmax')
     ])
     model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
-    model.summary()
-
     callbacks = [EarlyStopping(monitor='val_loss', patience=15, verbose=1, restore_best_weights=True)]
-    model.fit(X_train, y_train, epochs=150, batch_size=64, validation_split=0.2, callbacks=callbacks, verbose=1)
+    model.fit(X_train, y_train, epochs=150, batch_size=64, validation_split=0.2, callbacks=callbacks, verbose=0)
 
-    # 4. Evaluate
     y_pred_proba = model.predict(X_test)
     y_pred_encoded = np.argmax(y_pred_proba, axis=1)
     y_test_encoded = np.argmax(y_test, axis=1)
     
     accuracy = accuracy_score(y_test_encoded, y_pred_encoded)
     
-    # Use the saved sequence indices to get the correct true coordinates
-    true_coords = df_filtered.iloc[test_indices][['Latitude', 'Longitude']].values
+    test_indices_lstm = df_filtered.index[test_indices_lstm_seq]
+    true_coords = df_filtered.loc[test_indices_lstm][['Latitude', 'Longitude']].values
     pred_cell_ids = [label_to_cell_id.get(label) for label in y_pred_encoded]
     
     valid_indices = [i for i, cid in enumerate(pred_cell_ids) if cid is not None and cid in cell_centers]
@@ -120,24 +108,19 @@ def train_and_evaluate_lstm_classifier(X_scaled, y_encoded, num_classes, df_filt
     distances = haversine_distance(true_coords[valid_indices, 0], true_coords[valid_indices, 1], pred_coords[:, 0], pred_coords[:, 1])
     mean_error = np.mean(distances)
 
-    print(f"✅ LSTM Accuracy: {accuracy * 100:.2f}%")
-    print(f"🏆 LSTM Mean Positioning Error: {mean_error:.2f} meters")
-
     return model, mean_error, accuracy
 
 
-def train_and_evaluate_models(featured_data_path):
+def train_and_save_all_models(featured_data_path):
     """
-    Main function to run the model bake-off.
+    Main function to run the model bake-off and save ALL models.
     """
-    # --- 1. Load and Prepare Data ---
     script_dir = os.path.dirname(os.path.realpath(__file__))
     full_path = os.path.join(script_dir, featured_data_path)
     df = pd.read_excel(full_path)
     print(f"✅ Data loaded successfully from {full_path}")
     
     df_gridded, cell_centers = create_grid_and_assign_cells(df, grid_size_meters=15)
-    
     cell_counts = df_gridded['cell_id'].value_counts()
     cells_to_keep = cell_counts[cell_counts >= 2].index
     df_filtered = df_gridded[df_gridded['cell_id'].isin(cells_to_keep)].copy().reset_index(drop=True)
@@ -149,12 +132,11 @@ def train_and_evaluate_models(featured_data_path):
     label_encoder = LabelEncoder()
     y_encoded = label_encoder.fit_transform(y)
     label_to_cell_id = {label: cell_id for label, cell_id in enumerate(label_encoder.classes_)}
-    num_classes = len(label_encoder.classes_) # Needed for LSTM output layer
+    num_classes = len(label_encoder.classes_)
 
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
-    # --- 2. Define Tree-Based Models ---
     models_to_run = {
         'XGBoost': (
             xgb.XGBClassifier(objective='multi:softprob', eval_metric='mlogloss', use_label_encoder=False, random_state=42, n_jobs=-1),
@@ -167,16 +149,16 @@ def train_and_evaluate_models(featured_data_path):
     }
 
     results = {}
-
-    # --- 3. Train and Tune Tree-Based Models ---
-    X_train, X_test, y_train, y_test, train_indices, test_indices = train_test_split(
+    
+    # --- Train and Evaluate Tree-Based Models ---
+    X_train, X_test, y_train, y_test, _, test_indices = train_test_split(
         X_scaled, y_encoded, df_filtered.index, test_size=0.2, random_state=42, stratify=y_encoded
     )
     print(f"\nData split for Tree Models into {len(X_train)} training and {len(X_test)} testing samples.")
 
     for name, (model, params) in models_to_run.items():
         print(f"\n--- Tuning and Training {name} ---")
-        search = RandomizedSearchCV(model, params, n_iter=8, cv=3, verbose=1, n_jobs=-1, random_state=42)
+        search = RandomizedSearchCV(model, params, n_iter=8, cv=3, verbose=0, n_jobs=-1, random_state=42)
         search.fit(X_train, y_train)
         print(f"Best parameters for {name}: {search.best_params_}")
         best_model = search.best_estimator_
@@ -191,38 +173,46 @@ def train_and_evaluate_models(featured_data_path):
         
         distances = haversine_distance(true_coords[valid_indices, 0], true_coords[valid_indices, 1], pred_coords[:, 0], pred_coords[:, 1])
         mean_error = np.mean(distances)
-
-        print(f"✅ {name} Accuracy: {accuracy * 100:.2f}%")
-        print(f"🏆 {name} Mean Positioning Error: {mean_error:.2f} meters")
+        
         results[name] = {'model': best_model, 'error': mean_error, 'accuracy': accuracy}
 
-    # --- 4. Train and Evaluate LSTM Model ---
+    # --- Train and Evaluate LSTM Model ---
     lstm_model, lstm_error, lstm_accuracy = train_and_evaluate_lstm_classifier(
         X_scaled, y_encoded, num_classes, df_filtered, label_to_cell_id, cell_centers
     )
     results['LSTM'] = {'model': lstm_model, 'error': lstm_error, 'accuracy': lstm_accuracy}
 
-
-    # --- 5. Select and Save the Best Model ---
-    best_model_name = min(results, key=lambda k: results[k]['error'])
-    best_model_info = results[best_model_name]
-    
-    print(f"\n--- 🏆 Overall Best Model: {best_model_name} with {best_model_info['error']:.2f}m error ---")
-    
-    print("💾 Saving the best model and necessary assets...")
+    # --- Save All Trained Models ---
     models_dir = os.path.join(script_dir, "Models")
     os.makedirs(models_dir, exist_ok=True)
-    if best_model_name == 'LSTM':
-        best_model_info['model'].save(os.path.join(models_dir, 'best_classification_model.keras'))
-    else:
-        joblib.dump(best_model_info['model'], os.path.join(models_dir, 'best_classification_model.joblib'))
+    print("\n💾 Saving all trained models...")
+    for name, res in results.items():
+        if name == 'LSTM':
+            res['model'].save(os.path.join(models_dir, f'{name}_model.keras'))
+        else:
+            joblib.dump(res['model'], os.path.join(models_dir, f'{name}_model.joblib'))
+    print("✅ All models saved.")
     
+    # Save the essential processing objects
     joblib.dump(label_encoder, os.path.join(models_dir, 'label_encoder.joblib'))
     joblib.dump(cell_centers, os.path.join(models_dir, 'cell_centers.joblib'))
     joblib.dump(scaler, os.path.join(models_dir, 'feature_scaler.joblib'))
-    print("✅ All champion model assets saved successfully.")
+    print("✅ All processing assets saved successfully.")
 
-# --- Execution ---
+    # --- NEW: Final Performance Summary ---
+    summary_data = []
+    for name, res in results.items():
+        summary_data.append({
+            'Model': name,
+            'Accuracy (%)': res['accuracy'] * 100,
+            'Mean Error (m)': res['error']
+        })
+    summary_df = pd.DataFrame(summary_data).round(2).set_index('Model')
+    
+    print("\n--- Final Performance Summary ---")
+    print(summary_df)
+
+
 if __name__ == '__main__':
     DATA_PATH = os.path.join("Data", "featured_data_final_v3.xlsx")
-    train_and_evaluate_models(DATA_PATH)
+    train_and_save_all_models(DATA_PATH)
