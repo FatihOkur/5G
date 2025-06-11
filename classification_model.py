@@ -76,6 +76,7 @@ def train_and_evaluate_lstm_classifier(X_scaled, y_encoded, num_classes, df_filt
     TIME_STEPS = 10
     X_seq, y_seq, seq_indices = create_sequences(X_scaled, y_encoded, TIME_STEPS)
     y_seq_categorical = to_categorical(y_seq, num_classes=num_classes)
+
     X_train, X_test, y_train, y_test, _, test_indices_lstm_seq = train_test_split(
         X_seq, y_seq_categorical, seq_indices, test_size=0.2, random_state=42, stratify=y_seq_categorical
     )
@@ -113,7 +114,7 @@ def train_and_evaluate_lstm_classifier(X_scaled, y_encoded, num_classes, df_filt
 
 def train_and_save_all_models(featured_data_path):
     """
-    Main function to run the model bake-off and save ALL models.
+    Main function to run the model bake-off efficiently and save ALL models.
     """
     script_dir = os.path.dirname(os.path.realpath(__file__))
     full_path = os.path.join(script_dir, featured_data_path)
@@ -131,7 +132,6 @@ def train_and_save_all_models(featured_data_path):
 
     label_encoder = LabelEncoder()
     y_encoded = label_encoder.fit_transform(y)
-    label_to_cell_id = {label: cell_id for label, cell_id in enumerate(label_encoder.classes_)}
     num_classes = len(label_encoder.classes_)
 
     scaler = StandardScaler()
@@ -150,69 +150,65 @@ def train_and_save_all_models(featured_data_path):
 
     results = {}
     
-    # --- Train and Evaluate Tree-Based Models ---
+    # --- Split data for training ---
     X_train, X_test, y_train, y_test, _, test_indices = train_test_split(
         X_scaled, y_encoded, df_filtered.index, test_size=0.2, random_state=42, stratify=y_encoded
     )
-    print(f"\nData split for Tree Models into {len(X_train)} training and {len(X_test)} testing samples.")
+    print(f"\nData split into {len(X_train)} training and {len(X_test)} testing samples.")
+
+    # --- NEW: Create a smaller subsample for fast hyperparameter tuning ---
+    # Use a fraction of the data for the search, e.g., 20,000 samples
+    n_samples_for_tuning = min(20000, len(X_train))
+    subsample_indices = np.random.choice(len(X_train), n_samples_for_tuning, replace=False)
+    X_train_subsample = X_train[subsample_indices]
+    y_train_subsample = y_train[subsample_indices]
+    print(f"✅ Created a subsample of {n_samples_for_tuning} for fast hyperparameter tuning.")
 
     for name, (model, params) in models_to_run.items():
-        print(f"\n--- Tuning and Training {name} ---")
-        search = RandomizedSearchCV(model, params, n_iter=8, cv=3, verbose=0, n_jobs=-1, random_state=42)
-        search.fit(X_train, y_train)
+        print(f"\n--- Tuning {name} on subsample... ---")
+        search = RandomizedSearchCV(model, params, n_iter=8, cv=3, verbose=1, n_jobs=-1, random_state=42)
+        # Fit the search on the SMALLER dataset
+        search.fit(X_train_subsample, y_train_subsample)
+        
         print(f"Best parameters for {name}: {search.best_params_}")
+        
+        # --- Train the final model on the FULL training set with the best parameters ---
+        print(f"--- Training final {name} model on full dataset... ---")
         best_model = search.best_estimator_
-        
-        y_pred_encoded = best_model.predict(X_test)
-        accuracy = accuracy_score(y_test, y_pred_encoded)
-        
-        true_coords = df_filtered.loc[test_indices][['Latitude', 'Longitude']].values
-        pred_cell_ids = [label_to_cell_id.get(label) for label in y_pred_encoded]
-        valid_indices = [i for i, cid in enumerate(pred_cell_ids) if cid is not None and cid in cell_centers]
-        pred_coords = np.array([cell_centers[pred_cell_ids[i]] for i in valid_indices])
-        
-        distances = haversine_distance(true_coords[valid_indices, 0], true_coords[valid_indices, 1], pred_coords[:, 0], pred_coords[:, 1])
-        mean_error = np.mean(distances)
-        
-        results[name] = {'model': best_model, 'error': mean_error, 'accuracy': accuracy}
+        best_model.fit(X_train, y_train) # Retrain on all the data
 
-    # --- Train and Evaluate LSTM Model ---
-    lstm_model, lstm_error, lstm_accuracy = train_and_evaluate_lstm_classifier(
-        X_scaled, y_encoded, num_classes, df_filtered, label_to_cell_id, cell_centers
+        results[name] = {'model': best_model}
+
+    # --- Train and save the LSTM model (it's already relatively fast) ---
+    '''
+    lstm_model, _, _ = train_and_evaluate_lstm_classifier(
+        X_scaled, y_encoded, num_classes, df_filtered, 
+        {label: cell_id for label, cell_id in enumerate(label_encoder.classes_)}, 
+        cell_centers
     )
-    results['LSTM'] = {'model': lstm_model, 'error': lstm_error, 'accuracy': lstm_accuracy}
-
+    results['LSTM'] = {'model': lstm_model}
+    '''
+    
     # --- Save All Trained Models ---
     models_dir = os.path.join(script_dir, "Models")
     os.makedirs(models_dir, exist_ok=True)
     print("\n💾 Saving all trained models...")
     for name, res in results.items():
+        model_to_save = res['model']
         if name == 'LSTM':
-            res['model'].save(os.path.join(models_dir, f'{name}_model.keras'))
+            model_to_save.save(os.path.join(models_dir, f'{name}_model.keras'))
         else:
-            joblib.dump(res['model'], os.path.join(models_dir, f'{name}_model.joblib'))
-    print("✅ All models saved.")
+            joblib.dump(model_to_save, os.path.join(models_dir, f'{name}_model.joblib'))
+    print(f"✅ All models saved.")
     
     # Save the essential processing objects
     joblib.dump(label_encoder, os.path.join(models_dir, 'label_encoder.joblib'))
     joblib.dump(cell_centers, os.path.join(models_dir, 'cell_centers.joblib'))
     joblib.dump(scaler, os.path.join(models_dir, 'feature_scaler.joblib'))
     print("✅ All processing assets saved successfully.")
-
-    # --- NEW: Final Performance Summary ---
-    summary_data = []
-    for name, res in results.items():
-        summary_data.append({
-            'Model': name,
-            'Accuracy (%)': res['accuracy'] * 100,
-            'Mean Error (m)': res['error']
-        })
-    summary_df = pd.DataFrame(summary_data).round(2).set_index('Model')
-    
-    print("\n--- Final Performance Summary ---")
-    print(summary_df)
+    print("\n\nAll models trained and saved. You can now run evaluate.py to see the final results.")
 
 
 if __name__ == '__main__':
-    DATA_PATH = os.path.join("Data", "featured_data_final_v3.xlsx")
+    DATA_PATH = os.path.join("Data", "Merged_encoded_filled_filtered_pciCleaned_featureEngineered.xlsx")
     train_and_save_all_models(DATA_PATH)

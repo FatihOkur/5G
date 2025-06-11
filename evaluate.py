@@ -69,8 +69,7 @@ def evaluate_models(data_path):
         print(f"❌ Error loading assets: {e}. Please run classification_model.py first to train and save models.")
         return
 
-    # --- 2. Prepare Data (Corrected Logic) ---
-    # Recreate the grid system exactly as it was done in training
+    # --- 2. Prepare Data ---
     df_gridded = create_grid_and_assign_cells(df, grid_size_meters=15)
     print("✅ Grid system recreated for evaluation.")
     
@@ -96,11 +95,12 @@ def evaluate_models(data_path):
 
     TIME_STEPS = 10
     X_seq, y_seq, seq_indices = create_sequences(X_scaled, y_encoded, TIME_STEPS)
+    '''
     _, X_test_lstm, _, y_test_lstm, _, test_indices_lstm_seq = train_test_split(
         X_seq, y_seq, seq_indices, test_size=0.2, random_state=42, stratify=y_seq
     )
     test_indices_lstm = df_filtered.index[test_indices_lstm_seq]
-
+    '''
     # --- 4. Generate Predictions for Each Model ---
     predictions = {}
     
@@ -111,12 +111,14 @@ def evaluate_models(data_path):
             y_pred = model.predict(X_test_tree)
             predictions[model_name] = {'pred': y_pred, 'true': y_test_tree, 'indices': test_indices_tree}
 
+    '''
     lstm_path = os.path.join(models_dir, 'LSTM_model.keras')
     if os.path.exists(lstm_path):
         model = load_model(lstm_path)
         y_pred_proba = model.predict(X_test_lstm)
         y_pred_lstm = np.argmax(y_pred_proba, axis=1)
         predictions['LSTM'] = {'pred': y_pred_lstm, 'true': y_test_lstm, 'indices': test_indices_lstm}
+    '''
 
 
     # --- 5. Generate Reports and Visualizations ---
@@ -131,7 +133,13 @@ def evaluate_models(data_path):
         
         print(f"\n--- Evaluation Report for {name} ---")
         
-        report = classification_report(y_true, y_pred, labels=np.unique(y_true), zero_division=0, target_names=[f'Cell {i}' for i in np.unique(y_true)])
+        # Get the actual class names for the report
+        true_labels = np.unique(y_true)
+        pred_labels = np.unique(y_pred)
+        all_labels = np.unique(np.concatenate((true_labels, pred_labels)))
+        target_names = label_encoder.inverse_transform(all_labels)
+
+        report = classification_report(y_true, y_pred, labels=all_labels, target_names=target_names, zero_division=0)
         print(report)
         
         label_to_cell_id = {label: cell_id for label, cell_id in enumerate(label_encoder.classes_)}
@@ -174,5 +182,6 @@ def evaluate_models(data_path):
 
 # --- Execution ---
 if __name__ == '__main__':
-    DATA_PATH = os.path.join("Data", "featured_data_final_v3.xlsx")
+    # --- FIX: Point to the correct competition-ready data file ---
+    DATA_PATH = os.path.join("Data", "Merged_encoded_filled_filtered_pciCleaned_featureEngineered.xlsx")
     evaluate_models(DATA_PATH)
