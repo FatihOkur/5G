@@ -30,31 +30,50 @@ def haversine_distance(lat1, lon1, lat2, lon2):
 
 def create_grid_and_assign_cells(df, grid_size_meters=15):
     """
-    Creates a grid over the area and assigns each data point to a grid cell.
+    Creates a fixed grid over the entire ITU Ayazağa campus and assigns each 
+    data point to a grid cell. The grid boundaries are based on the 
+    ITU_SINIRDUVAR_EPSG4326 metadata.
     """
-    lat_min, lat_max = df['Latitude'].min(), df['Latitude'].max()
-    lon_min, lon_max = df['Longitude'].min(), df['Longitude'].max()
+    # Fixed ITU Campus Boundaries from ITU_SINIRDUVAR_EPSG4326METADATA.txt
+    lat_min = 41.098692000  # LOWER RIGHT Y
+    lat_max = 41.110922000  # UPPER LEFT Y
+    lon_min = 29.014443000  # UPPER LEFT X
+    lon_max = 29.037912000  # LOWER RIGHT X
+
+    # --- The rest of the function logic remains largely the same ---
+
+    # Calculate step size for latitude
     lat_step = grid_size_meters / 111000 
-    lon_step = grid_size_meters / (111000 * np.cos(np.radians(df['Latitude'].mean())))
+
+    # Use the mean latitude of the entire campus for a more accurate longitude step
+    mean_latitude_campus = (lat_min + lat_max) / 2
+    lon_step = grid_size_meters / (111000 * np.cos(np.radians(mean_latitude_campus)))
+
+    # Create the grid bins based on the fixed boundaries
     lat_bins = np.arange(lat_min, lat_max + lat_step, lat_step)
     lon_bins = np.arange(lon_min, lon_max + lon_step, lon_step)
+
+    # Assign each data point in the dataframe to a grid cell
     df['lat_cell'] = pd.cut(df['Latitude'], bins=lat_bins, labels=False, include_lowest=True)
     df['lon_cell'] = pd.cut(df['Longitude'], bins=lon_bins, labels=False, include_lowest=True)
+
+    # Create the unique cell_id string
     df['cell_id'] = df['lat_cell'].astype(str) + '_' + df['lon_cell'].astype(str)
+    
+    # --- Improved logic to create a complete dictionary of all cell centers ---
     
     lat_bin_centers = (lat_bins[:-1] + lat_bins[1:]) / 2
     lon_bin_centers = (lon_bins[:-1] + lon_bins[1:]) / 2
     
     cell_centers = {}
-    for cell_id in df['cell_id'].unique():
-        if pd.notna(cell_id):
-            try:
-                lat_idx, lon_idx = map(int, cell_id.split('_'))
-                if lat_idx < len(lat_bin_centers) and lon_idx < len(lon_bin_centers):
-                    cell_centers[cell_id] = (lat_bin_centers[lat_idx], lon_bin_centers[lon_idx])
-            except (ValueError, IndexError):
-                print(f"Warning: Could not process cell_id '{cell_id}'. Skipping.")
-    print(f"✅ Created a grid with {len(cell_centers)} unique cells.")
+    # Iterate through every possible cell in the grid to create a complete map
+    for lat_idx in range(len(lat_bin_centers)):
+        for lon_idx in range(len(lon_bin_centers)):
+            cell_id = f"{lat_idx}_{lon_idx}"
+            cell_centers[cell_id] = (lat_bin_centers[lat_idx], lon_bin_centers[lon_idx])
+            
+    print(f"✅ Created a fixed ITU grid with {len(cell_centers)} unique cells.")
+    
     return df, cell_centers
 
 def create_sequences(features, targets, time_steps=10):
@@ -188,7 +207,7 @@ def train_and_save_all_models(featured_data_path):
     )
     results['LSTM'] = {'model': lstm_model}
     '''
-    
+
     # --- Save All Trained Models ---
     models_dir = os.path.join(script_dir, "Models")
     os.makedirs(models_dir, exist_ok=True)

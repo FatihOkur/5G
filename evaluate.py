@@ -33,17 +33,24 @@ def create_sequences(features, targets, time_steps=10):
         target_indices.append(i + time_steps)
     return np.array(X_seq), np.array(y_seq), np.array(target_indices)
 
-def create_grid_and_assign_cells(df, grid_size_meters=15):
+def recreate_grid_from_fixed_boundaries(df, grid_size_meters=15):
     """
-    Creates a grid over the area and assigns each data point to a grid cell.
-    This function must be identical to the one in the training script.
+    Recreates the fixed grid over the entire ITU Ayazağa campus to assign 
+    cell_id to the evaluation data. This ensures consistency with the training process.
     """
-    lat_min, lat_max = df['Latitude'].min(), df['Latitude'].max()
-    lon_min, lon_max = df['Longitude'].min(), df['Longitude'].max()
-    lat_step = grid_size_meters / 111000 
-    lon_step = grid_size_meters / (111000 * np.cos(np.radians(df['Latitude'].mean())))
+    # Fixed ITU Campus Boundaries from ITU_SINIRDUVAR_EPSG4326METADATA.txt
+    lat_min = 41.098692000  # LOWER RIGHT Y
+    lat_max = 41.110922000  # UPPER LEFT Y
+    lon_min = 29.014443000  # UPPER LEFT X
+    lon_max = 29.037912000  # LOWER RIGHT X
+
+    lat_step = grid_size_meters / 111000
+    mean_latitude_campus = (lat_min + lat_max) / 2
+    lon_step = grid_size_meters / (111000 * np.cos(np.radians(mean_latitude_campus)))
+
     lat_bins = np.arange(lat_min, lat_max + lat_step, lat_step)
     lon_bins = np.arange(lon_min, lon_max + lon_step, lon_step)
+
     df['lat_cell'] = pd.cut(df['Latitude'], bins=lat_bins, labels=False, include_lowest=True)
     df['lon_cell'] = pd.cut(df['Longitude'], bins=lon_bins, labels=False, include_lowest=True)
     df['cell_id'] = df['lat_cell'].astype(str) + '_' + df['lon_cell'].astype(str)
@@ -70,11 +77,13 @@ def evaluate_models(data_path):
         return
 
     # --- 2. Prepare Data ---
-    df_gridded = create_grid_and_assign_cells(df, grid_size_meters=15)
-    print("✅ Grid system recreated for evaluation.")
+    # Recreate the grid using the fixed campus boundaries for consistency
+    df_gridded = recreate_grid_from_fixed_boundaries(df, grid_size_meters=15)
+    print("✅ Fixed ITU grid system recreated for evaluation.")
     
+    # Filter the data to only include cells that the model was trained on
     known_cells = label_encoder.classes_
-    df_filtered = df_gridded[df_gridded['cell_id'].isin(known_cells)].copy()
+    df_filtered = df_gridded[df_gridded['cell_id'].isin(known_cells)].copy().reset_index(drop=True)
     
     if df_filtered.empty:
         print("❌ Error: No known cell IDs found in the dataset after creating grid. Cannot evaluate.")
@@ -88,6 +97,23 @@ def evaluate_models(data_path):
     X_scaled = scaler.transform(X)
     y_encoded = label_encoder.transform(y)
     
+    # --- FIX for ValueError: Stratified split requires at least 2 members per class ---
+    # Ensure all classes in the set to be split have at least 2 members for stratification.
+    y_series = pd.Series(y_encoded)
+    class_counts = y_series.value_counts()
+    classes_to_keep = class_counts[class_counts >= 2].index
+
+    # Create a boolean mask for rows with classes that are large enough
+    is_class_large_enough = y_series.isin(classes_to_keep)
+
+    # Apply the mask to all relevant data before the split
+    df_filtered = df_filtered[is_class_large_enough].reset_index(drop=True)
+    X_scaled = X_scaled[is_class_large_enough.values]
+    y_encoded = y_encoded[is_class_large_enough.values]
+
+    print(f"✅ Filtered out single-member classes. Kept {len(df_filtered)} rows for splitting.")
+    # --- END FIX ---
+
     # --- 3. Create Consistent Test Sets for All Models ---
     _, X_test_tree, _, y_test_tree, _, test_indices_tree = train_test_split(
         X_scaled, y_encoded, df_filtered.index, test_size=0.2, random_state=42, stratify=y_encoded
@@ -182,6 +208,5 @@ def evaluate_models(data_path):
 
 # --- Execution ---
 if __name__ == '__main__':
-    # --- FIX: Point to the correct competition-ready data file ---
     DATA_PATH = os.path.join("Data", "Merged_encoded_filled_filtered_pciCleaned_featureEngineered.xlsx")
     evaluate_models(DATA_PATH)
