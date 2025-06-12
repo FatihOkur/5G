@@ -12,6 +12,7 @@ from sklearn.metrics import classification_report, confusion_matrix, accuracy_sc
 from tensorflow.keras.models import load_model
 from tensorflow.keras.utils import to_categorical
 import tensorflow as tf
+import geopandas as gpd
 
 # Set random seeds
 np.random.seed(42)
@@ -98,6 +99,141 @@ def plot_confusion_matrix(y_true, y_pred, model_name, save_path):
     plt.savefig(save_path)
     plt.close()
 
+def label_land_type_by_buffer(df, lat_col='Latitude', lon_col='Longitude', buffer_radius=5):
+    """
+    Her noktanın çevresindeki buffer alanı içinde hangi coğrafi yapı en yoğunsa onu 'land_type' olarak etiketler.
+    """
+    terrain_dir = "ITUMapData"
+    metric_crs = "EPSG:3857"
+    geo_crs = "EPSG:4326"
+
+    # Geo veri setlerini yükle
+    building = gpd.read_file(f"{terrain_dir}/ITU_3DBINA_EPSG4326.shp").to_crs(metric_crs)
+    vegetation = gpd.read_file(f"{terrain_dir}/ITU_3DVEGETATION_EPSG4326.shp").to_crs(metric_crs)
+    road = gpd.read_file(f"{terrain_dir}/ITU_ULASIMAGI_EPSG4326.shp").to_crs(metric_crs)
+    water = gpd.read_file(f"{terrain_dir}/ITU_SUKUTLESI_EPSG4326.shp").to_crs(metric_crs)
+    wall = gpd.read_file(f"{terrain_dir}/ITU_SINIRDUVAR_EPSG4326.shp").to_crs(metric_crs)
+
+    # Noktaları GeoDataFrame'e çevir
+    gdf = gpd.GeoDataFrame(df.copy(), geometry=gpd.points_from_xy(df[lon_col], df[lat_col]), crs=geo_crs)
+    gdf = gdf.to_crs(metric_crs)
+
+    # 5 metrelik buffer alan oluştur
+    gdf['buffer'] = gdf.geometry.buffer(buffer_radius)
+
+    # Coğrafi yapıların yoğunluklarını hesapla
+    sources = {
+        'building': building,
+        'vegetation': vegetation,
+        'road': road,
+        'water': water,
+        'wall': wall
+    }
+
+    def get_dominant_type(buffer_geom):
+        densities = {}
+        for lt, src in sources.items():
+            clipped = src.clip(buffer_geom)
+            if clipped.empty:
+                densities[lt] = 0
+            else:
+                # Yol ve duvar çizgi olduğu için uzunluk, diğerleri alan
+                if clipped.geometry.iloc[0].geom_type in ['LineString', 'MultiLineString']:
+                    densities[lt] = clipped.length.sum()
+                else:
+                    densities[lt] = clipped.area.sum()
+        return max(densities, key=densities.get) if any(v > 0 for v in densities.values()) else 'other'
+
+    gdf['land_type'] = gdf['buffer'].apply(get_dominant_type)
+    gdf.drop(columns=['buffer'], inplace=True)
+
+    return gdf
+
+def evaluate_land_type_performance(predictions, df_filtered, label_to_cell_id, cell_centers, visuals_dir):
+    """
+    Calculates and plots model performance for each land type.
+    """
+    print("\n" + "="*70)
+    print("LAND TYPE PERFORMANCE ANALYSIS")
+    print("="*70)
+
+    land_type_results = []
+
+    for model_name, data in predictions.items():
+        eval_indices = data['indices']
+        
+        # Create a temporary DataFrame with predictions and land types for the test set
+        test_df = df_filtered.loc[eval_indices].copy()
+        test_df['y_pred'] = data['pred']
+        test_df['y_true'] = data['true']
+        
+        for land_type in sorted(test_df['land_type'].unique()):
+            subset = test_df[test_df['land_type'] == land_type]
+            if subset.empty:
+                continue
+
+            # Calculate Accuracy
+            accuracy = accuracy_score(subset['y_true'], subset['y_pred'])
+
+            # Calculate Mean Error
+            true_coords = subset[['Latitude', 'Longitude']].values
+            pred_cell_ids = [label_to_cell_id.get(label) for label in subset['y_pred']]
+            
+            valid_indices = [i for i, cid in enumerate(pred_cell_ids) if cid is not None and cid in cell_centers]
+            
+            mean_error = np.nan
+            if len(valid_indices) > 0:
+                pred_coords = np.array([cell_centers[pred_cell_ids[i]] for i in valid_indices])
+                distances = haversine_distance(
+                    true_coords[valid_indices, 0], true_coords[valid_indices, 1],
+                    pred_coords[:, 0], pred_coords[:, 1]
+                )
+                mean_error = np.mean(distances)
+
+            land_type_results.append({
+                'Model': model_name,
+                'Land Type': land_type.capitalize(),
+                'Accuracy (%)': accuracy * 100,
+                'Mean Error (m)': mean_error
+            })
+
+    if not land_type_results:
+        print("No land type data to evaluate.")
+        return
+
+    results_df = pd.DataFrame(land_type_results)
+    print(results_df.to_string(index=False))
+
+    # Create plots
+    plt.figure(figsize=(18, 8))
+    
+    # Accuracy Plot
+    plt.subplot(1, 2, 1)
+    sns.barplot(data=results_df, x='Land Type', y='Accuracy (%)', hue='Model', palette='cividis')
+    plt.title('Model Accuracy by Land Type')
+    plt.ylabel('Accuracy (%)')
+    plt.xlabel('Land Type')
+    plt.xticks(rotation=45, ha='right')
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    plt.legend(title='Model')
+
+    # Mean Error Plot
+    plt.subplot(1, 2, 2)
+    sns.barplot(data=results_df, x='Land Type', y='Mean Error (m)', hue='Model', palette='cividis')
+    plt.title('Model Mean Error by Land Type')
+    plt.ylabel('Mean Error (meters)')
+    plt.xlabel('Land Type')
+    plt.xticks(rotation=45, ha='right')
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    plt.legend(title='Model')
+
+    plt.tight_layout()
+    save_path = os.path.join(visuals_dir, 'land_type_performance_comparison.png')
+    plt.savefig(save_path, dpi=300)
+    plt.show()
+    print(f"\n✅ Land type performance plot saved to {save_path}")
+
+
 def evaluate_models(data_path):
     """
     Loads trained models and evaluates their performance side-by-side.
@@ -133,6 +269,15 @@ def evaluate_models(data_path):
         return
         
     print(f"✅ Found {len(df_filtered)} rows with known cell IDs for evaluation.")
+
+    # Add land type labels to the data
+    print("🏷️ Labeling data points by dominant land type...")
+    try:
+        df_filtered = label_land_type_by_buffer(df_filtered)
+        print("✅ Land type labeling complete.")
+    except Exception as e:
+        print(f"❌ Could not perform land type labeling. Please ensure 'geopandas' is installed and shapefiles are in 'ITUMapData' directory. Error: {e}")
+        df_filtered['land_type'] = 'unknown'
 
     # Prepare features
     y = df_filtered['cell_id']
@@ -214,7 +359,6 @@ def evaluate_models(data_path):
     if len(available_models) >= 2:
         print("\n--- Evaluating Ensemble (Weighted Voting) ---")
 
-        # Ortak örnek indekslerini belirle (kesinlik için)
         common_indices = set(predictions[available_models[0]]['indices'])
         for name in available_models[1:]:
             common_indices &= set(predictions[name]['indices'])
@@ -224,14 +368,12 @@ def evaluate_models(data_path):
             ensemble_preds = []
             ensemble_true = []
 
-            # Ağırlıklar manuel olarak belirlenmiştir (toplamı 1 olmalı)
             model_weights = {
                 'XGBoost': 0.2,
                 'RandomForest': 0.3,
                 'LSTM': 0.5
             }
 
-            # Her modelin index -> prediction haritası
             model_preds_by_index = {
                 name: {idx: pred for idx, pred in zip(data['indices'], data['pred'])}
                 for name, data in predictions.items()
@@ -244,7 +386,7 @@ def evaluate_models(data_path):
                     weighted_votes[pred] += model_weights.get(model_name, 1.0)
                 final_pred = max(weighted_votes, key=weighted_votes.get)
                 ensemble_preds.append(final_pred)
-                ensemble_true.append(model_preds_by_index[available_models[0]][idx])  # hepsi aynı
+                ensemble_true.append(model_preds_by_index[available_models[0]][idx])
 
             ensemble_preds = np.array(ensemble_preds)
             ensemble_true = np.array(ensemble_true)
@@ -267,11 +409,10 @@ def evaluate_models(data_path):
     label_to_cell_id = {label: cell_id for label, cell_id in enumerate(label_encoder.classes_)}
     
     # Create subplots for error distribution
-    fig, axes = plt.subplots(1, len(predictions), figsize=(6*len(predictions), 5))
-    if len(predictions) == 1:
-        axes = [axes]
+    fig, axes = plt.subplots(1, len(predictions), figsize=(6*len(predictions), 5), squeeze=False)
     
     for idx, (name, data) in enumerate(predictions.items()):
+        ax = axes[0, idx]
         y_pred = data['pred']
         y_true = data['true']
         eval_indices = data['indices']
@@ -284,10 +425,8 @@ def evaluate_models(data_path):
         # Classification metrics
         accuracy = accuracy_score(y_true, y_pred)
         
-        # Get unique labels for the report
         unique_labels = np.unique(np.concatenate((y_true, y_pred)))
         
-        # Create classification report with limited classes for readability
         if len(unique_labels) > 10:
             print(f"\nShowing metrics for top 10 classes (out of {len(unique_labels)} total):")
             top_classes = pd.Series(y_true).value_counts().head(10).index
@@ -325,14 +464,14 @@ def evaluate_models(data_path):
             print(f"  Max Error: {np.max(distances):.2f} meters")
             
             # Plot error distribution
-            axes[idx].hist(distances, bins=50, alpha=0.7, color=plt.cm.tab10(idx))
-            axes[idx].axvline(mean_error, color='red', linestyle='--', label=f'Mean: {mean_error:.1f}m')
-            axes[idx].axvline(median_error, color='green', linestyle='--', label=f'Median: {median_error:.1f}m')
-            axes[idx].set_xlabel('Error Distance (meters)')
-            axes[idx].set_ylabel('Frequency')
-            axes[idx].set_title(f'{name} Error Distribution')
-            axes[idx].legend()
-            axes[idx].grid(True, alpha=0.3)
+            ax.hist(distances, bins=50, alpha=0.7, color=plt.cm.tab10(idx))
+            ax.axvline(mean_error, color='red', linestyle='--', label=f'Mean: {mean_error:.1f}m')
+            ax.axvline(median_error, color='green', linestyle='--', label=f'Median: {median_error:.1f}m')
+            ax.set_xlabel('Error Distance (meters)')
+            ax.set_ylabel('Frequency')
+            ax.set_title(f'{name} Error Distribution')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
             
             # Save confusion matrix
             cm_path = os.path.join(visuals_dir, f'{name}_confusion_matrix.png')
@@ -362,11 +501,11 @@ def evaluate_models(data_path):
     
     # Plot 1: Prediction paths comparison
     plt.subplot(2, 2, 1)
-    colors = {'XGBoost': 'red', 'RandomForest': 'green', 'LSTM': 'purple'}
+    colors = {'XGBoost': 'red', 'RandomForest': 'green', 'LSTM': 'purple', 'Ensemble': 'blue'}
     
-    # Plot a subset of predictions for clarity
     n_points = min(500, len(test_indices_tree))
     for name, data in predictions.items():
+        if name == 'Ensemble': continue # Don't plot ensemble path for clarity
         eval_indices = data['indices']
         y_pred = data['pred']
         pred_cell_ids = [label_to_cell_id.get(label) for label in y_pred[:n_points]]
@@ -374,15 +513,15 @@ def evaluate_models(data_path):
         if valid_indices:
             pred_coords = np.array([cell_centers[pred_cell_ids[i]] for i in valid_indices])
             plt.scatter(pred_coords[:, 1], pred_coords[:, 0], 
-                       color=colors.get(name, 'blue'), 
-                       label=f'{name} Predictions', 
-                       s=20, alpha=0.6)
+                        color=colors.get(name, 'blue'), 
+                        label=f'{name} Predictions', 
+                        s=20, alpha=0.6)
     
     # Plot actual path
     if 'XGBoost' in predictions:
         true_coords = df_filtered.loc[predictions['XGBoost']['indices'][:n_points]][['Latitude', 'Longitude']].values
         plt.scatter(true_coords[:, 1], true_coords[:, 0], 
-                   color='black', label='Actual Path', s=10, alpha=0.9, zorder=5)
+                    color='black', label='Actual Path', s=10, alpha=0.9, zorder=5)
     
     plt.title('Model Predictions vs Actual Path')
     plt.xlabel('Longitude')
@@ -394,20 +533,15 @@ def evaluate_models(data_path):
     results_df = pd.DataFrame(results_data).round(2)
     
     plt.subplot(2, 2, 2)
-    metrics = ['Accuracy (%)', 'Mean Error (m)', 'Median Error (m)']
-    x = np.arange(len(results_df))
-    width = 0.25
+    metrics_to_plot = ['Accuracy (%)', 'Mean Error (m)', 'Median Error (m)']
+    results_melted = results_df.melt(id_vars='Model', value_vars=metrics_to_plot)
     
-    for i, metric in enumerate(metrics):
-        plt.bar(x + i*width, results_df[metric], width, label=metric)
-    
-    plt.xlabel('Model')
+    sns.barplot(data=results_melted, x='variable', y='value', hue='Model')
+    plt.title('Overall Performance Metrics Comparison')
+    plt.xlabel('Metric')
     plt.ylabel('Value')
-    plt.title('Performance Metrics Comparison')
-    plt.xticks(x + width, results_df['Model'])
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    
+    plt.xticks(rotation=15)
+
     # Plot 3: Error percentiles
     plt.subplot(2, 2, 3)
     models = results_df['Model'].values
@@ -416,9 +550,9 @@ def evaluate_models(data_path):
     p90_errors = results_df['90th Percentile (m)'].values
     
     x = np.arange(len(models))
-    plt.plot(x, mean_errors, 'o-', label='Mean', markersize=10)
-    plt.plot(x, median_errors, 's-', label='Median', markersize=10)
-    plt.plot(x, p90_errors, '^-', label='90th Percentile', markersize=10)
+    plt.plot(x, mean_errors, 'o-', label='Mean', markersize=8)
+    plt.plot(x, median_errors, 's-', label='Median', markersize=8)
+    plt.plot(x, p90_errors, '^-', label='90th Percentile', markersize=8)
     
     plt.xlabel('Model')
     plt.ylabel('Error (meters)')
@@ -429,7 +563,7 @@ def evaluate_models(data_path):
     
     # Plot 4: Inference time
     plt.subplot(2, 2, 4)
-    plt.bar(results_df['Model'], results_df['Inference Time (s)'])
+    sns.barplot(data=results_df, x='Model', y='Inference Time (s)')
     plt.xlabel('Model')
     plt.ylabel('Time (seconds)')
     plt.title('Inference Time Comparison')
@@ -478,6 +612,10 @@ def evaluate_models(data_path):
             print("  ✅ Fast inference suitable for real-time")
         else:
             print("  ⚠️  Consider optimization for faster inference")
+
+    # Evaluate performance by land type if the column exists
+    if 'land_type' in df_filtered.columns and 'unknown' not in df_filtered['land_type'].unique():
+        evaluate_land_type_performance(predictions, df_filtered, label_to_cell_id, cell_centers, visuals_dir)
 
 
 # Execution
