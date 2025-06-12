@@ -1,0 +1,4 @@
+Model,Accuracy (%),Mean Error (m),Median Error (m),90th Percentile (m),Inference Time (s)
+XGBoost,86.88,7.23,6.35,9.42,0.04
+RandomForest,86.59,7.41,6.43,9.64,0.06
+LSTM,86.3,7.88,6.43,9.69,1.44
