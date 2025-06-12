@@ -152,7 +152,7 @@ def train_and_evaluate_lstm_classifier(X_scaled, y_encoded, num_classes, df_filt
         test_size=0.2, random_state=42, stratify=y_seq
     )
     
-    print(f"LSTM data split into {len(X_train)} training and {len(X_test)} testing sequences.")
+    print(f"LSTM data split into {len(X_train)} training and {lhissen(X_test)} testing sequences.")
     print(f"Input shape: {X_train.shape}, Output shape: {y_train.shape}")
     
     # Build model
