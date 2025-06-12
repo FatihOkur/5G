@@ -36,7 +36,7 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     r = 6371 
     return c * r * 1000
 
-def create_grid_and_assign_cells(df, grid_size_meters=15):
+def create_grid_and_assign_cells(df, grid_size_meters=10):
     """
     Creates a fixed grid over the entire ITU Ayazağa campus and assigns each 
     data point to a grid cell. The grid boundaries are based on the 
@@ -239,7 +239,7 @@ def train_and_save_all_models(featured_data_path):
     print(f"✅ Data loaded successfully from {full_path}")
     
     # Create grid and filter sparse cells
-    df_gridded, cell_centers = create_grid_and_assign_cells(df, grid_size_meters=15)
+    df_gridded, cell_centers = create_grid_and_assign_cells(df, grid_size_meters=10)
     cell_counts = df_gridded['cell_id'].value_counts()
     cells_to_keep = cell_counts[cell_counts >= 5].index  # Increased threshold for LSTM
     df_filtered = df_gridded[df_gridded['cell_id'].isin(cells_to_keep)].copy().reset_index(drop=True)

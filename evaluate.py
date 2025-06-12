@@ -47,7 +47,7 @@ def create_sequences(features, targets, time_steps=10):
     
     return np.array(X_seq), np.array(y_seq), np.array(target_indices)
 
-def recreate_grid_from_fixed_boundaries(df, grid_size_meters=15):
+def recreate_grid_from_fixed_boundaries(df, grid_size_meters=10):
     """
     Recreates the fixed grid over the entire ITU Ayazağa campus to assign 
     cell_id to the evaluation data.
@@ -121,7 +121,7 @@ def evaluate_models(data_path):
         return
 
     # Prepare Data
-    df_gridded = recreate_grid_from_fixed_boundaries(df, grid_size_meters=15)
+    df_gridded = recreate_grid_from_fixed_boundaries(df, grid_size_meters=10)
     print("✅ Fixed ITU grid system recreated for evaluation.")
     
     # Filter for known cells
@@ -205,6 +205,62 @@ def evaluate_models(data_path):
             'time': pred_time
         }
         print(f"Prediction time: {pred_time:.3f} seconds")
+
+    # Ensemble model (Weighted Voting)
+    from collections import defaultdict
+
+    available_models = [name for name in ['XGBoost', 'RandomForest', 'LSTM'] if name in predictions]
+
+    if len(available_models) >= 2:
+        print("\n--- Evaluating Ensemble (Weighted Voting) ---")
+
+        # Ortak örnek indekslerini belirle (kesinlik için)
+        common_indices = set(predictions[available_models[0]]['indices'])
+        for name in available_models[1:]:
+            common_indices &= set(predictions[name]['indices'])
+
+        if common_indices:
+            common_indices = sorted(list(common_indices))
+            ensemble_preds = []
+            ensemble_true = []
+
+            # Ağırlıklar manuel olarak belirlenmiştir (toplamı 1 olmalı)
+            model_weights = {
+                'XGBoost': 0.2,
+                'RandomForest': 0.3,
+                'LSTM': 0.5
+            }
+
+            # Her modelin index -> prediction haritası
+            model_preds_by_index = {
+                name: {idx: pred for idx, pred in zip(data['indices'], data['pred'])}
+                for name, data in predictions.items()
+            }
+
+            for idx in common_indices:
+                weighted_votes = defaultdict(float)
+                for model_name in available_models:
+                    pred = model_preds_by_index[model_name][idx]
+                    weighted_votes[pred] += model_weights.get(model_name, 1.0)
+                final_pred = max(weighted_votes, key=weighted_votes.get)
+                ensemble_preds.append(final_pred)
+                ensemble_true.append(model_preds_by_index[available_models[0]][idx])  # hepsi aynı
+
+            ensemble_preds = np.array(ensemble_preds)
+            ensemble_true = np.array(ensemble_true)
+
+            pred_time = sum([predictions[name]['time'] for name in available_models])
+
+            predictions['Ensemble'] = {
+                'pred': ensemble_preds,
+                'true': ensemble_true,
+                'indices': common_indices,
+                'time': pred_time
+            }
+
+            print(f"Prediction time (summed): {pred_time:.3f} seconds")
+        else:
+            print("❌ No overlapping indices among base models. Skipping Ensemble.")
 
     # Generate detailed reports and visualizations
     results_data = []
