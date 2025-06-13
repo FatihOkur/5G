@@ -155,7 +155,7 @@ def train_and_evaluate_lstm_classifier(X_scaled, y_encoded, num_classes, df_filt
     print("Training LSTM model...")
     history = model.fit(
         X_train, y_train, 
-        epochs=100, 
+        epochs=200, 
         batch_size=64, 
         validation_split=0.2, 
         callbacks=callbacks, 
@@ -178,7 +178,11 @@ def train_and_evaluate_lstm_classifier(X_scaled, y_encoded, num_classes, df_filt
     true_coords = df_filtered.loc[test_original_indices][['Latitude', 'Longitude']].values
     
     # Use the new function to get refined coordinates
-    pred_coords = calculate_weighted_coordinates(y_pred_proba, label_encoder, cell_centers, top_n=3)
+    pred_coords = calculate_weighted_coordinates(y_pred_proba, label_encoder, cell_centers, top_n=5)
+
+    from shapefile_file_generator import save_predictions_to_shapefile  
+    save_predictions_to_shapefile(pred_coords, true_coords, "SapeFiles/LSTM_predictions.shp")
+    
     
     # Calculate haversine distance with the new coordinates
     valid_indices = ~np.isnan(pred_coords).any(axis=1)

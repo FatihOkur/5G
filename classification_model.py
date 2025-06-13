@@ -172,7 +172,7 @@ def train_and_evaluate_lstm_classifier(X_scaled, y_encoded, num_classes, df_filt
     print("Training LSTM model...")
     history = model.fit(
         X_train, y_train, 
-        epochs=100, 
+        epochs=200, 
         batch_size=64, 
         validation_split=0.2, 
         callbacks=callbacks, 

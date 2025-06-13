@@ -159,7 +159,7 @@ def evaluate_models(data_path):
         true_coords = df_filtered.loc[eval_indices][['Latitude', 'Longitude']].values
         
         # Use the post-processing function to get refined coordinates
-        pred_coords_weighted = calculate_weighted_coordinates(y_pred_proba, label_encoder, cell_centers, top_n=3)
+        pred_coords_weighted = calculate_weighted_coordinates(y_pred_proba, label_encoder, cell_centers, top_n=5)
         
         # Filter out any NaN results if a cell_id was not in cell_centers
         valid_indices = ~np.isnan(pred_coords_weighted).any(axis=1)
