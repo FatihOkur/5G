@@ -137,10 +137,68 @@ def evaluate_models(data_path):
             'true': y_test_lstm, 
             'indices': test_indices_lstm,
         }
-
     # --- 5. Generate detailed reports and visualizations using weighted method ---
     results_data = []
     
+    # === ENSEMBLE ===
+    print("\n" + "="*50)
+    print("--- Ensemble Model (Weighted Probabilities) ---")
+    print("="*50)
+
+    model_weights = {'XGBoost': 0.2, 'RandomForest': 0.3, 'LSTM': 0.5}
+    available_models = [name for name in model_weights if name in predictions]
+
+    common_indices = set(predictions[available_models[0]]['indices'])
+    for name in available_models[1:]:
+        common_indices &= set(predictions[name]['indices'])
+
+    common_indices = sorted(list(common_indices))
+    if not common_indices:
+        print("❌ No common indices found among models for ensemble.")
+    else:
+        ensemble_proba = []
+        for idx in common_indices:
+            combined = np.zeros_like(predictions[available_models[0]]['pred_proba'][0])
+            for model_name in available_models:
+                model_idx = predictions[model_name]['indices'].get_loc(idx)
+                combined += model_weights[model_name] * predictions[model_name]['pred_proba'][model_idx]
+            ensemble_proba.append(combined)
+
+        ensemble_proba = np.array(ensemble_proba)
+        ensemble_true = df_filtered.loc[common_indices]['cell_id']
+        ensemble_true_encoded = label_encoder.transform(ensemble_true)
+        ensemble_coords = calculate_weighted_coordinates(ensemble_proba, label_encoder, cell_centers, top_n=5)
+
+        true_coords = df_filtered.loc[common_indices][['Latitude', 'Longitude']].values
+        valid_indices = ~np.isnan(ensemble_coords).any(axis=1)
+
+        if np.any(valid_indices):
+            distances = haversine_distance(
+                true_coords[valid_indices, 0], true_coords[valid_indices, 1], 
+                ensemble_coords[valid_indices, 0], ensemble_coords[valid_indices, 1]
+            )
+            mean_error = np.mean(distances)
+            median_error = np.median(distances)
+            percentile_90 = np.percentile(distances, 90)
+            accuracy = accuracy_score(ensemble_true_encoded[valid_indices], np.argmax(ensemble_proba[valid_indices], axis=1))
+
+            print(f"Top-1 Accuracy: {accuracy:.4f}")
+            print(f"  Mean Error: {mean_error:.2f} meters")
+            print(f"  Median Error: {median_error:.2f} meters")
+            print(f"  90th Percentile: {percentile_90:.2f} meters")
+        else:
+            mean_error = median_error = percentile_90 = np.inf
+            accuracy = 0.0
+            print("Warning: No valid predictions for ensemble model.")
+
+        results_data.append({
+            'Model': 'Ensemble', 
+            'Accuracy (%)': accuracy * 100, 
+            'Mean Error (m)': mean_error,
+            'Median Error (m)': median_error,
+            '90th Percentile (m)': percentile_90,
+        })
+
     for name, data in predictions.items():
         print(f"\n{'='*50}")
         print(f"--- Detailed Evaluation Report for {name} ---")
